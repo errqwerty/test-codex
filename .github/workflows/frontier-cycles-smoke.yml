@@ -9,18 +9,25 @@ permissions:
 jobs:
   cycles:
     runs-on: ubuntu-24.04
-    timeout-minutes: 8
+    timeout-minutes: 20
     steps:
-      - name: Install free Ubuntu Blender package
+      - name: Select Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install official Blender Python wheel
+        timeout-minutes: 15
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends blender
-          blender --version
+          python -m venv "$RUNNER_TEMP/blender-venv"
+          source "$RUNNER_TEMP/blender-venv/bin/activate"
+          python -m pip install --index-url https://pypi.org/simple --only-binary=:all: --timeout 60 --retries 2 bpy==4.5.16
+          python -c "import bpy; print('BLENDER_VERSION', bpy.app.version_string); print('CYCLES_AVAILABLE', bpy.app.build_options.cycles); assert bpy.app.build_options.cycles"
+          echo "$RUNNER_TEMP/blender-venv/bin" >> "$GITHUB_PATH"
       - name: Render original synthetic robot with Cycles
         run: |
           mkdir -p result
           cat > smoke.py <<'PY'
-          import bpy, math, time, json, os
+          import bpy, math, time, json, os, hashlib, struct
           from mathutils import Vector
           bpy.ops.object.select_all(action='SELECT')
           bpy.ops.object.delete(use_global=False)
@@ -86,17 +93,20 @@ jobs:
           bpy.ops.object.camera_add(location=(5,-8,4.1));cam=bpy.context.object;aim(cam,(0,0,1.55));cam.data.lens=60
           cam.data.dof.use_dof=True;cam.data.dof.focus_distance=(cam.location-Vector((0,0,1.55))).length;cam.data.dof.aperture_fstop=5.6
           sc=bpy.context.scene;sc.camera=cam;sc.world.color=(.12,.12,.12)
-          sc.render.engine='CYCLES';sc.cycles.device='CPU';sc.cycles.samples=32;sc.cycles.use_denoising=True
+          sc.render.engine='CYCLES';sc.render.threads_mode='FIXED';sc.render.threads=4;sc.cycles.device='CPU';sc.cycles.samples=32;sc.cycles.use_denoising=True
           sc.render.resolution_x=800;sc.render.resolution_y=600;sc.render.resolution_percentage=100
           sc.render.image_settings.file_format='PNG';sc.render.filepath=os.path.abspath('result/cycles.png')
           t=time.monotonic();bpy.ops.render.render(write_still=True)
           assert os.path.getsize(sc.render.filepath)>1000
           proof=dict(version=bpy.app.version_string,engine=sc.render.engine,device=sc.cycles.device,samples=sc.cycles.samples,width=800,height=600,seconds=round(time.monotonic()-t,3),png_bytes=os.path.getsize(sc.render.filepath))
+          with open(sc.render.filepath,'rb') as f: png=f.read()
+          assert png[:8]==b'\x89PNG\r\n\x1a\n' and struct.unpack('>II',png[16:24])==(800,600)
+          proof['sha256']=hashlib.sha256(png).hexdigest()
           print('CYCLES_PROOF',json.dumps(proof),flush=True)
           with open('result/proof.json','w') as f:json.dump(proof,f,indent=2)
           bpy.ops.wm.save_as_mainfile(filepath=os.path.abspath('result/robot.blend'))
           PY
-          blender -b -t 4 --python-exit-code 1 --python smoke.py
+          python -u smoke.py
           test -s result/cycles.png
           cat result/proof.json >> "$GITHUB_STEP_SUMMARY"
       - name: Upload render and proof
